@@ -1,0 +1,161 @@
+function generateSupplierSheets() {
+
+  const TEMPLATE_ID = "1ZhtAsFgmXVxgbOr-AT3vXkS-1YAJSsE-LMxLpYvIlNA";
+  const MAIN_FOLDER_NAME = "LD";
+  const SOURCE_SHEET = "Working sheet";
+  const TARGET_SHEET = "offene Liefertermine";
+  const STATUS_SHEET = "Status sheet";
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const master = ss.getSheetByName(SOURCE_SHEET);
+  if (!master) return;
+
+  // =====================
+  // STATUS SHEET SETUP
+  // =====================
+  var statusSheet = ss.getSheetByName(STATUS_SHEET);
+  if (!statusSheet) {
+    statusSheet = ss.insertSheet(STATUS_SHEET);
+    // Updated columns
+    statusSheet.appendRow([
+      "File Name",      // A
+      "Saved in Drive", // B
+      "Drive Link",     // C
+      "Drafts",         // D
+      "Date",           // E
+      "Subject",        // F
+      "Error"           // G
+    ]);
+  }
+
+  // =====================
+  // READ MASTER DATA
+  // =====================
+  var data = master.getDataRange().getValues();
+
+  var supplierCol = 0;
+  var poCol = 2;
+  var itemCol = 3;
+  var vpnCol = 4;
+  var qtyCol = 5;
+  var statusCol = 10;
+
+  var groups = {};
+
+  // =====================
+  // GROUP DATA BY SUPPLIER
+  // =====================
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][statusCol] !== "Request Mail") continue;
+    var supplier = data[i][supplierCol];
+    if (!supplier) continue;
+
+    if (!groups[supplier]) {
+      groups[supplier] = [];
+    }
+
+    groups[supplier].push([
+      data[i][poCol],
+      data[i][itemCol],
+      data[i][vpnCol],
+      data[i][qtyCol]
+    ]);
+  }
+
+  if (Object.keys(groups).length === 0) return;
+
+  // =====================
+  // CREATE / GET FOLDERS
+  // =====================
+  var mainFolder = DriveApp.getFoldersByName(MAIN_FOLDER_NAME).hasNext()
+    ? DriveApp.getFoldersByName(MAIN_FOLDER_NAME).next()
+    : DriveApp.createFolder(MAIN_FOLDER_NAME);
+
+  var today = Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), "dd-MM-yyyy");
+
+  var dateFolder = mainFolder.getFoldersByName(today).hasNext()
+    ? mainFolder.getFoldersByName(today).next()
+    : mainFolder.createFolder(today);
+
+  // =====================
+  // PROCESS SUPPLIERS
+  // =====================
+  for (var supplier in groups) {
+    try {
+      var safeSupplier = supplier.replace(/[\\\/\?\*\[\]]/g, "");
+      var fileName = "Liefertermine_" + safeSupplier + "_" + today;
+
+      // ============ DUPLICATE CHECK ============
+      var existingFiles = dateFolder.getFilesByName(fileName + ".xlsx");
+      if (existingFiles.hasNext()) {
+        Logger.log("Skipped " + supplier + " — file already exists.");
+        statusSheet.appendRow([
+          fileName,
+          "SKIPPED",
+          existingFiles.next().getUrl(),
+          "",
+          "",
+          "",
+          "Already exists"
+        ]);
+        continue; // skip supplier
+      }
+
+      // ============ COPY TEMPLATE ============
+      var template = DriveApp.getFileById(TEMPLATE_ID);
+      var copy = template.makeCopy(fileName + "_TEMP", dateFolder);
+
+      var copySS = SpreadsheetApp.open(copy);
+      var sheet = copySS.getSheetByName(TARGET_SHEET);
+
+      sheet.getRange(2, 1, groups[supplier].length, 4)
+        .setValues(groups[supplier]);
+
+      SpreadsheetApp.flush();
+
+      // ============ EXPORT TO REAL EXCEL ============
+      var url = "https://docs.google.com/spreadsheets/d/" +
+        copy.getId() +
+        "/export?format=xlsx";
+
+      var token = ScriptApp.getOAuthToken();
+
+      var response = UrlFetchApp.fetch(url, {
+        headers: { Authorization: "Bearer " + token }
+      });
+
+      var excelFile = dateFolder.createFile(
+        response.getBlob().setName(fileName + ".xlsx")
+      );
+
+      // DELETE TEMP FILE
+      copy.setTrashed(true);
+
+      // =====================
+      // LOG SUCCESS IN STATUS SHEET
+      // =====================
+      statusSheet.appendRow([
+        fileName,          // File Name
+        "YES",             // Saved in Drive
+        excelFile.getUrl(),// Drive Link
+        "",                // Drafts (empty for now)
+        today,             // Date
+        "",                // Subject (empty for now)
+        ""                 // Error
+      ]);
+
+    } catch (e) {
+      statusSheet.appendRow([
+        supplier, // File Name
+        "NO",     // Saved in Drive
+        "",       // Drive Link
+        "",       // Drafts
+        "",       // Date
+        "",       // Subject
+        e.toString() // Error
+      ]);
+    }
+  }
+
+  Logger.log("All supplier Excel files processed successfully.");
+}
